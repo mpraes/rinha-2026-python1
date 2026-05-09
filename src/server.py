@@ -3,7 +3,7 @@
 import json
 import struct
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +15,7 @@ def clamp(x: float) -> float:
 
 
 def load_index(path: Path):
-    """Load binary index file with memory-mapped vectors."""
+    """Load binary index file with vectors in RAM for speed."""
     with open(path, "rb") as f:
         magic = struct.unpack("<I", f.read(4))[0]
         if magic != 0x52494E48:
@@ -37,7 +37,7 @@ def load_index(path: Path):
         n_centroids_fraud = struct.unpack("<I", f.read(4))[0]
         dimensions = struct.unpack("<I", f.read(4))[0]
         
-        # Calculate offsets for memory mapping
+        # Calculate offsets
         header_size = 32 if version >= 3 else 24
         legit_offset = header_size
         fraud_offset = legit_offset + n_legit * dimensions * 4
@@ -45,13 +45,20 @@ def load_index(path: Path):
         fraud_cent_offset = legit_cent_offset + n_centroids_legit * dimensions * 4
         lists_offset = fraud_cent_offset + n_centroids_fraud * dimensions * 4
     
-    # Memory-map vectors (OS handles paging)
-    legit_vectors = np.memmap(path, dtype=np.float32, mode='r', 
-                               offset=legit_offset, shape=(n_legit, dimensions))
-    fraud_vectors = np.memmap(path, dtype=np.float32, mode='r',
-                               offset=fraud_offset, shape=(n_fraud, dimensions))
+    # Load vectors directly into RAM (much faster than memmap)
+    print(f"Loading {n_legit} legit vectors into RAM...")
+    with open(path, "rb") as f:
+        f.seek(legit_offset)
+        legit_vectors = np.frombuffer(f.read(n_legit * dimensions * 4), 
+                                      dtype=np.float32).reshape(n_legit, dimensions).copy()
     
-    # Centroids are small, load into memory
+    print(f"Loading {n_fraud} fraud vectors into RAM...")
+    with open(path, "rb") as f:
+        f.seek(fraud_offset)
+        fraud_vectors = np.frombuffer(f.read(n_fraud * dimensions * 4),
+                                      dtype=np.float32).reshape(n_fraud, dimensions).copy()
+    
+    # Load centroids
     with open(path, "rb") as f:
         f.seek(legit_cent_offset)
         legit_centroids = np.frombuffer(f.read(n_centroids_legit * dimensions * 4), 
@@ -150,7 +157,7 @@ class FraudDetector:
         top_fraud_idx = np.argmin(dists_fraud)
         
         candidates = []
-        max_candidates_per_class = 500  # Limit candidates to avoid scanning entire cluster
+        max_candidates_per_class = 100  # Drastically reduced for throughput
         
         # Get candidates from nearest legit centroid
         legit_indices = idx["legit_lists"][top_legit_idx]
@@ -243,7 +250,7 @@ def main():
     detector = FraudDetector(resources_path, data_path)
     print("Index loaded")
     
-    server = HTTPServer(("0.0.0.0", 8000), FraudHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", 8000), FraudHandler)
     print("Server running on port 8000")
     server.serve_forever()
 

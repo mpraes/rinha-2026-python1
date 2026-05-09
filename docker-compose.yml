@@ -8,7 +8,7 @@ services:
       resources:
         limits:
           cpus: "0.45"
-          memory: "140M"
+          memory: "160M"
 
   api2:
     <<: *api
@@ -28,4 +28,4 @@ services:
       resources:
         limits:
           cpus: "0.1"
-          memory: "70M"
+          memory: "30M"
