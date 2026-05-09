@@ -21,7 +21,8 @@ WORKDIR /app
 
 COPY --from=build /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=build /app/src ./src
-COPY --from=build /app/resources ./resources
+COPY --from=build /app/resources/mcc_risk.json ./resources/mcc_risk.json
+COPY --from=build /app/resources/normalization.json ./resources/normalization.json
 COPY --from=build /app/data ./data
 
 ENV PYTHONUNBUFFERED=1
