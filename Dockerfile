@@ -13,9 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src ./src
 COPY resources ./resources
 
-RUN if [ ! -f data/index.bin ]; then \
-        python -m src.pack; \
-    fi
+RUN mkdir -p data && python -m src.pack
 
 FROM --platform=linux/amd64 python:3.12-slim
 
