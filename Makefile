@@ -1,13 +1,19 @@
-.PHONY: test pack bench run test-local test-k6
+.PHONY: test smoke test-full pack bench run run-detached stop
 
+# Quick smoke test (5 requests, validates API contract)
+smoke:
+	k6 run test/smoke.js
+
+# Full test with scoring (54k requests, 120s duration)
 test:
-	python3 test/load_test.py
+	k6 run test/test.js
 
-test-local:
-	python3 test/load_test.py -u 10 -r 10
+# Alias for test
+test-full: test
 
-test-k6:
-	k6 run test/script.js
+# Python load test (alternative, no k6 required)
+test-python:
+	python3 test/load_test.py -u 20 -r 50
 
 pack:
 	python3 -m src.pack

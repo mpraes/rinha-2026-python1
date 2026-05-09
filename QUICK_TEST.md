@@ -1,98 +1,186 @@
 # Quick Local Testing Guide
 
-## Setup (One-time)
+## Prerequisites
 
 ```bash
-# 1. Install k6 (optional, for official test)
-# See: https://grafana.com/docs/k6/latest/set-up/install-k6/
+# Install k6 (required for official tests)
+# Ubuntu/Debian:
+sudo gpg -k
+sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491435B36B6
+echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+sudo apt-get update
+sudo apt-get install k6
 
-# 2. Get official test files from Rinha repo (optional)
-git clone https://github.com/zanfranceschi/rinha-de-backend-2026.git
-cp -r rinha-de-backend-2026/test ./test/
+# macOS:
+brew install k6
 ```
 
-## Run Tests
+## Quick Start
 
-### Option 1: Simple Python Test (No k6 needed)
+### 1. Smoke Test (Quick Validation - 5 requests)
 
 ```bash
 # Start API
 make run-detached
 
-# Run test
+# Run smoke test (validates API contract)
+make smoke
+
+# Stop API
+make stop
+```
+
+**Expected output:**
+```
+✓ status is 200
+✓ body is json
+✓ approved is boolean
+✓ fraud_score is number
+```
+
+### 2. Full Test (Complete Evaluation - 54k requests)
+
+```bash
+# Start API
+make run-detached
+
+# Run full test with scoring (120 seconds, 900 RPS)
 make test
 
-# Or with custom parameters
-python3 test/load_test.py -u 20 -r 50  # 20 users, 50 requests each
-
 # View results
-cat test_results.json | jq .
+cat test/results.json | jq .
 
 # Stop API
 make stop
 ```
 
-### Option 2: k6 Test (Official)
+**Expected output:**
+```json
+{
+  "p99": "5.81ms",
+  "scoring": {
+    "breakdown": {
+      "true_positive_detections": 1735,
+      "true_negative_detections": 3210,
+      "false_positive_detections": 40,
+      "false_negative_detections": 15,
+      "http_errors": 0
+    },
+    "failure_rate": "1.10%",
+    "final_score": 3425.03
+  }
+}
+```
+
+## Test Commands
+
+```bash
+make smoke        # Quick validation (5 requests, ~10s)
+make test         # Full test with scoring (54k requests, 120s)
+make test-python  # Alternative Python test (no k6 required)
+```
+
+## Monitor During Tests
+
+```bash
+# Watch memory usage
+watch -n 1 docker stats --no-stream
+
+# Check logs
+docker compose logs -f api1
+```
+
+## What Gets Tested
+
+### Smoke Test (`smoke.js`)
+- ✅ API responds on port 9999
+- ✅ Returns 200 status
+- ✅ Returns valid JSON
+- ✅ Has `approved` (boolean) field
+- ✅ Has `fraud_score` (number) field
+
+### Full Test (`test.js`)
+- 🎯 **54,100 test transactions** with expected results
+- 🎯 **Detection accuracy**: TP, TN, FP, FN, HTTP errors
+- 🎯 **Latency metrics**: P99, throughput
+- 🎯 **Full scoring**: Detection score + Latency score
+
+## Score Interpretation
+
+**Good Results:**
+- ✅ P99 < 10ms → latency score ~2000+
+- ✅ HTTP errors = 0
+- ✅ Failure rate < 5%
+- ✅ Final score > 3000
+
+**Bad Results:**
+- ❌ P99 > 2000ms → latency score = -3000 (cutoff)
+- ❌ HTTP errors > 0 → impacts both detection and failure rate
+- ❌ Failure rate > 15% → detection score = -3000 (cutoff)
+
+## Memory Validation
 
 ```bash
 # Start API
 make run-detached
 
-# Run k6 test
-make test-k6
-
-# Or directly
-k6 run test/script.js
-
-# View results
-cat results.json | jq .
-
-# Stop API
-make stop
-```
-
-## Monitor During Test
-
-```bash
-# In another terminal
+# Check memory limits
 docker stats --no-stream
+
+# Expected:
+# api1: < 140 MB
+# api2: < 140 MB
+# lb: < 70 MB
+# Total: < 350 MB
 ```
 
-## What to Check
+## Troubleshooting
 
-✅ **Good Results:**
-- P99 latency < 100ms (ideally < 10ms)
-- HTTP errors = 0
-- All checks pass
-- Memory < 350 MB total
-
-❌ **Bad Results:**
-- P99 > 2000ms (triggers cutoff)
-- HTTP errors > 0
-- Memory exceeds limits
-- Timeouts
-
-## Quick Commands
-
+### Test fails to connect
 ```bash
-# Build and start
-make run-detached
-
-# Test endpoint
+# Check if API is running
 curl http://localhost:9999/ready
 
-# Run load test
-make test
-
-# Check memory
-docker stats --no-stream
-
-# Stop everything
-make stop
+# Check logs
+docker compose logs api1
 ```
 
-## Note
+### Memory issues
+```bash
+# If hitting limits, reduce container memory or optimize code
+docker stats --no-stream
+```
 
-Test files (`test/` directory, `test_results.json`, `results.json`) are excluded from git via `.gitignore`. These are for local testing only and won't be part of your submission.
+### Test file not found
+```bash
+# Ensure symlink exists
+ls -la test/test-data.json
 
-For full scoring with labeled test data, use the official test files from the Rinha repository or wait for the preview test via GitHub issue.
+# If missing, create it:
+cd test && ln -sf test_data.json test-data.json
+```
+
+## Test Files (in .gitignore)
+
+The following test files are excluded from git:
+- `test/` directory
+- `test/results.json`
+- `test_data.json` (47 MB)
+
+These are for local testing only and won't be part of your submission.
+
+## Next Steps After Testing
+
+1. **If tests pass:** 
+   - Build and push Docker image to public registry
+   - Update `docker-compose.yml` with public image URL
+   - Push to GitHub
+
+2. **If tests fail:**
+   - Debug issues (memory, performance, accuracy)
+   - Optimize code
+   - Re-run tests
+
+3. **Run preview test:**
+   - Create GitHub issue with description: `rinha/test`
+   - Wait for official Rinha engine results
