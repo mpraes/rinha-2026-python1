@@ -139,30 +139,41 @@ class FraudDetector:
         """Search for k nearest neighbors, return fraud count."""
         idx = self.index
         
-        # Find nearest centroid for each class (reduced from 3 to 1)
+        # Find nearest centroid for each class
         diff_legit = idx["legit_centroids"] - query
         diff_fraud = idx["fraud_centroids"] - query
         dists_legit = np.sum(diff_legit ** 2, axis=1)
         dists_fraud = np.sum(diff_fraud ** 2, axis=1)
         
-        # Only use nearest centroid (dramatically reduces candidates)
-        top_legit = [np.argmin(dists_legit)]
-        top_fraud = [np.argmin(dists_fraud)]
+        # Use only nearest centroid
+        top_legit_idx = np.argmin(dists_legit)
+        top_fraud_idx = np.argmin(dists_fraud)
         
         candidates = []
+        max_candidates_per_class = 500  # Limit candidates to avoid scanning entire cluster
         
-        # Collect candidates with distance calculation
-        for c in top_legit:
-            for i in idx["legit_lists"][c]:
-                vec = idx["legit_vectors"][i]
-                dist = np.sum((vec - query) ** 2)
-                candidates.append((dist, 0))
+        # Get candidates from nearest legit centroid
+        legit_indices = idx["legit_lists"][top_legit_idx]
+        if len(legit_indices) > max_candidates_per_class:
+            # Sample evenly if too many
+            step = len(legit_indices) // max_candidates_per_class
+            legit_indices = legit_indices[::step][:max_candidates_per_class]
         
-        for c in top_fraud:
-            for i in idx["fraud_lists"][c]:
-                vec = idx["fraud_vectors"][i]
-                dist = np.sum((vec - query) ** 2)
-                candidates.append((dist, 1))
+        for i in legit_indices:
+            vec = idx["legit_vectors"][i]
+            dist = np.sum((vec - query) ** 2)
+            candidates.append((dist, 0))
+        
+        # Get candidates from nearest fraud centroid
+        fraud_indices = idx["fraud_lists"][top_fraud_idx]
+        if len(fraud_indices) > max_candidates_per_class:
+            step = len(fraud_indices) // max_candidates_per_class
+            fraud_indices = fraud_indices[::step][:max_candidates_per_class]
+        
+        for i in fraud_indices:
+            vec = idx["fraud_vectors"][i]
+            dist = np.sum((vec - query) ** 2)
+            candidates.append((dist, 1))
         
         if len(candidates) < k:
             return 0
