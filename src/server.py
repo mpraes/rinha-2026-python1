@@ -23,15 +23,22 @@ def load_index(path: Path):
         
         version = struct.unpack("<I", f.read(4))[0]
         total_vectors = struct.unpack("<I", f.read(4))[0]
+        
+        # Version 3+ has exact counts
+        if version >= 3:
+            n_legit = struct.unpack("<I", f.read(4))[0]
+            n_fraud = struct.unpack("<I", f.read(4))[0]
+        else:
+            # Fallback for version 2 (estimate)
+            n_legit = total_vectors - int(total_vectors * 0.06)
+            n_fraud = total_vectors - n_legit
+        
         n_centroids_legit = struct.unpack("<I", f.read(4))[0]
         n_centroids_fraud = struct.unpack("<I", f.read(4))[0]
         dimensions = struct.unpack("<I", f.read(4))[0]
         
-        n_legit = total_vectors - int(total_vectors * 0.06)
-        n_fraud = total_vectors - n_legit
-        
         # Calculate offsets for memory mapping
-        header_size = 24
+        header_size = 32 if version >= 3 else 24
         legit_offset = header_size
         fraud_offset = legit_offset + n_legit * dimensions * 4
         legit_cent_offset = fraud_offset + n_fraud * dimensions * 4
@@ -132,19 +139,19 @@ class FraudDetector:
         """Search for k nearest neighbors, return fraud count."""
         idx = self.index
         
-        # Find nearest centroids (these are in memory, fast)
+        # Find nearest centroid for each class (reduced from 3 to 1)
         diff_legit = idx["legit_centroids"] - query
         diff_fraud = idx["fraud_centroids"] - query
         dists_legit = np.sum(diff_legit ** 2, axis=1)
         dists_fraud = np.sum(diff_fraud ** 2, axis=1)
         
-        # Collect candidate indices from top centroids
-        top_legit = np.argpartition(dists_legit, 3)[:3]
-        top_fraud = np.argpartition(dists_fraud, 3)[:3]
+        # Only use nearest centroid (dramatically reduces candidates)
+        top_legit = [np.argmin(dists_legit)]
+        top_fraud = [np.argmin(dists_fraud)]
         
         candidates = []
         
-        # Access vectors via memmap (OS pages in only what's needed)
+        # Collect candidates with distance calculation
         for c in top_legit:
             for i in idx["legit_lists"][c]:
                 vec = idx["legit_vectors"][i]

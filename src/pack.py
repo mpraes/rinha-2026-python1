@@ -117,10 +117,12 @@ def pack():
     
     print(f"Writing {output_file}...")
     with open(output_file, "wb") as f:
-        # Header
+        # Header (version 3 - with exact counts)
         f.write(struct.pack("<I", 0x52494E48))  # "RINH" magic
-        f.write(struct.pack("<I", 2))  # version 2 (class-separated)
+        f.write(struct.pack("<I", 3))  # version 3 (with n_legit and n_fraud)
         f.write(struct.pack("<I", n_legit + n_fraud))  # total vectors
+        f.write(struct.pack("<I", n_legit))  # exact legit count
+        f.write(struct.pack("<I", n_fraud))  # exact fraud count
         f.write(struct.pack("<I", n_centroids_legit))  # legit centroids
         f.write(struct.pack("<I", n_centroids_fraud))  # fraud centroids
         f.write(struct.pack("<I", 14))  # dimensions
