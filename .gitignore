@@ -33,6 +33,7 @@ results.json
 
 # Documentation
 *.md
+!README.md
 
 # Git
 .git/
