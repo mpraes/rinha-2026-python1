@@ -156,39 +156,40 @@ class FraudDetector:
         top_legit_idx = np.argmin(dists_legit)
         top_fraud_idx = np.argmin(dists_fraud)
         
-        candidates = []
-        max_candidates_per_class = 100  # Drastically reduced for throughput
+        max_candidates = 50  # Reduced for speed
         
-        # Get candidates from nearest legit centroid
+        # Vectorized distance computation for legit candidates
         legit_indices = idx["legit_lists"][top_legit_idx]
-        if len(legit_indices) > max_candidates_per_class:
-            # Sample evenly if too many
-            step = len(legit_indices) // max_candidates_per_class
-            legit_indices = legit_indices[::step][:max_candidates_per_class]
+        if len(legit_indices) > max_candidates:
+            step = len(legit_indices) // max_candidates
+            legit_indices = legit_indices[::step][:max_candidates]
         
-        for i in legit_indices:
-            vec = idx["legit_vectors"][i]
-            dist = np.sum((vec - query) ** 2)
-            candidates.append((dist, 0))
+        legit_vecs = idx["legit_vectors"][legit_indices]
+        legit_dists = np.sum((legit_vecs - query) ** 2, axis=1)
         
-        # Get candidates from nearest fraud centroid
+        # Vectorized distance computation for fraud candidates
         fraud_indices = idx["fraud_lists"][top_fraud_idx]
-        if len(fraud_indices) > max_candidates_per_class:
-            step = len(fraud_indices) // max_candidates_per_class
-            fraud_indices = fraud_indices[::step][:max_candidates_per_class]
+        if len(fraud_indices) > max_candidates:
+            step = len(fraud_indices) // max_candidates
+            fraud_indices = fraud_indices[::step][:max_candidates]
         
-        for i in fraud_indices:
-            vec = idx["fraud_vectors"][i]
-            dist = np.sum((vec - query) ** 2)
-            candidates.append((dist, 1))
+        fraud_vecs = idx["fraud_vectors"][fraud_indices]
+        fraud_dists = np.sum((fraud_vecs - query) ** 2, axis=1)
         
-        if len(candidates) < k:
+        # Combine distances with labels
+        all_dists = np.concatenate([legit_dists, fraud_dists])
+        all_labels = np.concatenate([
+            np.zeros(len(legit_dists), dtype=np.int32),
+            np.ones(len(fraud_dists), dtype=np.int32)
+        ])
+        
+        if len(all_dists) < k:
             return 0
         
-        # Sort by distance and count frauds in top-k
-        candidates.sort(key=lambda x: x[0])
-        fraud_count = sum(label for _, label in candidates[:k])
-        return fraud_count
+        # Use argpartition for O(N) instead of O(N log N) sort
+        top_k_indices = np.argpartition(all_dists, k)[:k]
+        fraud_count = np.sum(all_labels[top_k_indices])
+        return int(fraud_count)
     
     def detect(self, payload: dict) -> dict:
         """Detect fraud for a transaction."""

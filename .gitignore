@@ -31,5 +31,8 @@ results.json
 *.swp
 *.swo
 
+# Documentation
+*.md
+
 # Git
 .git/
