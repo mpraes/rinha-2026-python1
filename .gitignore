@@ -20,6 +20,11 @@ env/
 # Generated data files
 data/
 
+# Test files and results (local testing only)
+test/
+test_results.json
+results.json
+
 # IDE
 .vscode/
 .idea/
