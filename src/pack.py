@@ -1,158 +1,158 @@
-"""Generate binary index from references.json.gz using class-separated IVF."""
+"""Generate IVF index with int8 quantization from references.json.gz - streaming."""
 
 import gzip
-import json
 import struct
 import random
 from pathlib import Path
 
+import ijson
 import numpy as np
 
 
-def kmeans_vectorized(data: np.ndarray, n_clusters: int, max_iter: int = 20) -> np.ndarray:
-    """Vectorized K-means clustering."""
-    n_samples = data.shape[0]
-    
-    if n_samples < n_clusters:
-        # Not enough samples, return all as centroids
-        return data.copy()
-    
-    # Initialize centroids randomly
-    indices = random.sample(range(n_samples), n_clusters)
-    centroids = data[indices].copy()
-    
-    for iteration in range(max_iter):
-        # Compute distances: (n_samples, n_clusters)
-        diff = data[:, np.newaxis, :] - centroids[np.newaxis, :, :]
-        distances = np.sum(diff ** 2, axis=2)
-        assignments = np.argmin(distances, axis=1)
-        
-        # Update centroids
-        new_centroids = np.zeros_like(centroids)
-        for j in range(n_clusters):
-            mask = assignments == j
-            if np.any(mask):
-                new_centroids[j] = data[mask].mean(axis=0)
-            else:
-                new_centroids[j] = centroids[j]
-        
-        centroids = new_centroids
-    
-    return centroids
-
-
 def pack():
-    """Pack references.json.gz into binary index with class-separated clusters."""
+    """Pack references.json.gz into IVF index with int8 quantization."""
     resources_path = Path(__file__).parent.parent / "resources"
     data_path = Path(__file__).parent.parent / "data"
     data_path.mkdir(exist_ok=True)
     
     refs_file = resources_path / "references.json.gz"
-    output_file = data_path / "rinha.idx"
     
-    print(f"Reading {refs_file}...")
-    with gzip.open(refs_file, "rt") as f:
-        references = json.load(f)
+    # First pass: count vectors and compute quantization params
+    print("First pass: computing quantization parameters...")
+    n_vectors = 0
+    dim_min = np.full(14, np.inf, dtype=np.float32)
+    dim_max = np.full(14, -np.inf, dtype=np.float32)
     
-    print(f"Processing {len(references)} vectors...")
+    with gzip.open(refs_file, "rb") as f:
+        for ref in ijson.items(f, "item"):
+            vec = ref["vector"]
+            n_vectors += 1
+            # Update min/max (handle -1 sentinel for dims 5, 6)
+            for i in range(14):
+                v = vec[i]
+                if v >= 0 or i not in [5, 6]:
+                    dim_min[i] = min(dim_min[i], v)
+                    dim_max[i] = max(dim_max[i], v)
+            if n_vectors % 500000 == 0:
+                print(f"  Scanned {n_vectors}")
     
-    # Separate vectors by class (fraud vs legit)
-    legit_vectors = []
-    fraud_vectors = []
+    print(f"Total vectors: {n_vectors}")
     
-    for ref in references:
-        vec = np.array(ref["vector"], dtype=np.float32)
-        if ref["label"] == "fraud":
-            fraud_vectors.append(vec)
-        else:
-            legit_vectors.append(vec)
+    # Compute scale
+    dim_range = dim_max - dim_min
+    dim_range = np.where(dim_range < 1e-6, 1.0, dim_range)
+    dim_scale = 254.0 / dim_range
     
-    legit_vectors = np.array(legit_vectors, dtype=np.float32)
-    fraud_vectors = np.array(fraud_vectors, dtype=np.float32)
+    # Sample vectors for clustering
+    print("Sampling vectors for clustering...")
+    sample_size = min(100000, n_vectors)
+    sample_indices = set(random.sample(range(n_vectors), sample_size))
     
-    n_legit = len(legit_vectors)
-    n_fraud = len(fraud_vectors)
-    print(f"Legit: {n_legit}, Fraud: {n_fraud} ({100*n_fraud/(n_legit+n_fraud):.2f}% fraud)")
+    sample_vectors = []
+    idx = 0
+    with gzip.open(refs_file, "rb") as f:
+        for ref in ijson.items(f, "item"):
+            if idx in sample_indices:
+                vec = np.array(ref["vector"], dtype=np.float32)
+                vec_q = np.clip((vec - dim_min) * dim_scale - 127, -128, 127).astype(np.float32)
+                sample_vectors.append(vec_q)
+            idx += 1
+    sample_vectors = np.array(sample_vectors, dtype=np.float32)
     
-    # Cluster each class separately (key insight from GUIDELINES.md)
-    # Use more centroids for the larger class to balance search
-    n_centroids_legit = 20
-    n_centroids_fraud = 12  # Fewer since fraud is smaller
-    
-    print(f"Clustering legit vectors into {n_centroids_legit} centroids...")
+    # K-means clustering on sample
+    n_centroids = 64
+    print(f"Clustering {sample_size} samples into {n_centroids} centroids...")
     random.seed(42)
     np.random.seed(42)
-    legit_centroids = kmeans_vectorized(legit_vectors, n_centroids_legit)
     
-    print(f"Clustering fraud vectors into {n_centroids_fraud} centroids...")
-    fraud_centroids = kmeans_vectorized(fraud_vectors, n_centroids_fraud)
+    indices = random.sample(range(sample_size), n_centroids)
+    centroids = sample_vectors[indices].copy()
     
-    # Assign each vector to its nearest centroid
-    print("Assigning vectors to centroids...")
+    for iteration in range(20):
+        diff = sample_vectors[:, np.newaxis, :] - centroids[np.newaxis, :, :]
+        distances = np.sum(diff ** 2, axis=2)
+        assignments = np.argmin(distances, axis=1)
+        
+        new_centroids = np.zeros_like(centroids)
+        for j in range(n_centroids):
+            mask = assignments == j
+            if np.any(mask):
+                new_centroids[j] = sample_vectors[mask].mean(axis=0)
+            else:
+                new_centroids[j] = centroids[j]
+        centroids = new_centroids
     
-    # Legit assignments
-    diff_legit = legit_vectors[:, np.newaxis, :] - legit_centroids[np.newaxis, :, :]
-    legit_distances = np.sum(diff_legit ** 2, axis=2)
-    legit_assignments = np.argmin(legit_distances, axis=1)
+    # Second pass: assign all vectors and write directly to arrays
+    print("Second pass: assigning vectors to centroids...")
+    lists = [[] for _ in range(n_centroids)]
+    labels = np.zeros(n_vectors, dtype=np.int32)
+    vectors_q = np.zeros((n_vectors, 14), dtype=np.int8)
     
-    # Fraud assignments
-    diff_fraud = fraud_vectors[:, np.newaxis, :] - fraud_centroids[np.newaxis, :, :]
-    fraud_distances = np.sum(diff_fraud ** 2, axis=2)
-    fraud_assignments = np.argmin(fraud_distances, axis=1)
+    idx = 0
+    with gzip.open(refs_file, "rb") as f:
+        for ref in ijson.items(f, "item"):
+            vec = np.array(ref["vector"], dtype=np.float32)
+            labels[idx] = 1 if ref["label"] == "fraud" else 0
+            
+            # Quantize
+            vec_q = np.clip((vec - dim_min) * dim_scale - 127, -128, 127).astype(np.int8)
+            vectors_q[idx] = vec_q
+            
+            # Assign to centroid
+            diff = centroids - vec_q.astype(np.float32)
+            dist = np.sum(diff ** 2, axis=1)
+            cluster = np.argmin(dist)
+            lists[cluster].append(idx)
+            
+            idx += 1
+            if idx % 500000 == 0:
+                print(f"  Processed {idx}/{n_vectors}")
     
-    # Build inverted lists (indices relative to each class)
-    legit_lists = [[] for _ in range(n_centroids_legit)]
-    for i, cluster in enumerate(legit_assignments):
-        legit_lists[cluster].append(i)
+    n_fraud = np.sum(labels)
+    print(f"Fraud: {n_fraud} ({100*n_fraud/n_vectors:.2f}%)")
     
-    fraud_lists = [[] for _ in range(n_centroids_fraud)]
-    for i, cluster in enumerate(fraud_assignments):
-        fraud_lists[cluster].append(i)
+    list_sizes = [len(lst) for lst in lists]
+    print(f"Cluster sizes: min={min(list_sizes)}, max={max(list_sizes)}, avg={sum(list_sizes)//len(list_sizes)}")
     
-    # Print cluster sizes
-    legit_sizes = [len(lst) for lst in legit_lists]
-    fraud_sizes = [len(lst) for lst in fraud_lists]
-    print(f"Legit clusters: min={min(legit_sizes)}, max={max(legit_sizes)}, avg={sum(legit_sizes)//len(legit_sizes)}")
-    print(f"Fraud clusters: min={min(fraud_sizes)}, max={max(fraud_sizes)}, avg={sum(fraud_sizes)//len(fraud_sizes)}")
-    
+    # Write binary index
+    output_file = data_path / "rinha.idx"
     print(f"Writing {output_file}...")
+    
     with open(output_file, "wb") as f:
-        # Header (version 3 - with exact counts)
-        f.write(struct.pack("<I", 0x52494E48))  # "RINH" magic
-        f.write(struct.pack("<I", 3))  # version 3 (with n_legit and n_fraud)
-        f.write(struct.pack("<I", n_legit + n_fraud))  # total vectors
-        f.write(struct.pack("<I", n_legit))  # exact legit count
-        f.write(struct.pack("<I", n_fraud))  # exact fraud count
-        f.write(struct.pack("<I", n_centroids_legit))  # legit centroids
-        f.write(struct.pack("<I", n_centroids_fraud))  # fraud centroids
+        # Header
+        f.write(struct.pack("<I", 0x52494E48))  # "RINH"
+        f.write(struct.pack("<I", 5))  # version 5 = IVF + int8
+        f.write(struct.pack("<I", n_vectors))
+        f.write(struct.pack("<I", n_centroids))
         f.write(struct.pack("<I", 14))  # dimensions
         
-        # Legit vectors (float32)
-        f.write(legit_vectors.tobytes())
+        # Quantization params
+        f.write(dim_min.astype(np.float32).tobytes())
+        f.write(dim_scale.astype(np.float32).tobytes())
         
-        # Fraud vectors (float32)
-        f.write(fraud_vectors.tobytes())
+        # Centroids
+        f.write(centroids.astype(np.float32).tobytes())
         
-        # Legit centroids (float32)
-        f.write(legit_centroids.astype(np.float32).tobytes())
+        # Labels
+        f.write(labels.tobytes())
         
-        # Fraud centroids (float32)
-        f.write(fraud_centroids.astype(np.float32).tobytes())
+        # Quantized vectors
+        f.write(vectors_q.tobytes())
         
-        # Legit inverted lists
-        for lst in legit_lists:
+        # Inverted lists
+        for lst in lists:
             f.write(struct.pack("<I", len(lst)))
-            for idx in lst:
-                f.write(struct.pack("<I", idx))
-        
-        # Fraud inverted lists
-        for lst in fraud_lists:
-            f.write(struct.pack("<I", len(lst)))
-            for idx in lst:
-                f.write(struct.pack("<I", idx))
+            for i in lst:
+                f.write(struct.pack("<I", i))
     
-    print(f"Index written to {output_file}")
-    print(f"File size: {output_file.stat().st_size / 1024 / 1024:.2f} MB")
+    file_size = output_file.stat().st_size / 1024 / 1024
+    print(f"Index written: {file_size:.2f} MB")
+    
+    # Memory estimate
+    vectors_mem = n_vectors * 14 / 1024 / 1024  # int8
+    labels_mem = n_vectors * 4 / 1024 / 1024  # int32
+    centroids_mem = n_centroids * 14 * 4 / 1024 / 1024  # float32
+    print(f"Runtime memory: ~{vectors_mem + labels_mem + centroids_mem:.1f} MB")
 
 
 if __name__ == "__main__":

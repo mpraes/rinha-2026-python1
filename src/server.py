@@ -1,4 +1,4 @@
-"""ASGI HTTP server for fraud detection API."""
+"""ASGI HTTP server for fraud detection API with IVF + int8."""
 
 import struct
 from datetime import datetime
@@ -13,78 +13,56 @@ def clamp(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
-def load_index(path: Path):
-    """Load binary index file with vectors in RAM for speed."""
-    with open(path, "rb") as f:
+def load_index(data_path: Path):
+    """Load IVF index with int8 quantization."""
+    index_file = data_path / "rinha.idx"
+    
+    print(f"Loading index from {index_file}...")
+    with open(index_file, "rb") as f:
         magic = struct.unpack("<I", f.read(4))[0]
         if magic != 0x52494E48:
             raise ValueError(f"Invalid magic: {hex(magic)}")
         
         version = struct.unpack("<I", f.read(4))[0]
-        total_vectors = struct.unpack("<I", f.read(4))[0]
+        if version != 5:
+            raise ValueError(f"Unsupported version: {version}")
         
-        # Version 3+ has exact counts
-        if version >= 3:
-            n_legit = struct.unpack("<I", f.read(4))[0]
-            n_fraud = struct.unpack("<I", f.read(4))[0]
-        else:
-            # Fallback for version 2 (estimate)
-            n_legit = total_vectors - int(total_vectors * 0.06)
-            n_fraud = total_vectors - n_legit
+        n_vectors = struct.unpack("<I", f.read(4))[0]
+        n_centroids = struct.unpack("<I", f.read(4))[0]
+        n_dims = struct.unpack("<I", f.read(4))[0]
         
-        n_centroids_legit = struct.unpack("<I", f.read(4))[0]
-        n_centroids_fraud = struct.unpack("<I", f.read(4))[0]
-        dimensions = struct.unpack("<I", f.read(4))[0]
+        # Quantization params
+        dim_min = np.frombuffer(f.read(n_dims * 4), dtype=np.float32).copy()
+        dim_scale = np.frombuffer(f.read(n_dims * 4), dtype=np.float32).copy()
         
-        # Calculate offsets
-        header_size = 32 if version >= 3 else 24
-        legit_offset = header_size
-        fraud_offset = legit_offset + n_legit * dimensions * 4
-        legit_cent_offset = fraud_offset + n_fraud * dimensions * 4
-        fraud_cent_offset = legit_cent_offset + n_centroids_legit * dimensions * 4
-        lists_offset = fraud_cent_offset + n_centroids_fraud * dimensions * 4
-    
-    # Load vectors directly into RAM (much faster than memmap)
-    print(f"Loading {n_legit} legit vectors into RAM...")
-    with open(path, "rb") as f:
-        f.seek(legit_offset)
-        legit_vectors = np.frombuffer(f.read(n_legit * dimensions * 4), 
-                                      dtype=np.float32).reshape(n_legit, dimensions).copy()
-    
-    print(f"Loading {n_fraud} fraud vectors into RAM...")
-    with open(path, "rb") as f:
-        f.seek(fraud_offset)
-        fraud_vectors = np.frombuffer(f.read(n_fraud * dimensions * 4),
-                                      dtype=np.float32).reshape(n_fraud, dimensions).copy()
-    
-    # Load centroids
-    with open(path, "rb") as f:
-        f.seek(legit_cent_offset)
-        legit_centroids = np.frombuffer(f.read(n_centroids_legit * dimensions * 4), 
-                                        dtype=np.float32).reshape(n_centroids_legit, dimensions)
-        fraud_centroids = np.frombuffer(f.read(n_centroids_fraud * dimensions * 4),
-                                        dtype=np.float32).reshape(n_centroids_fraud, dimensions)
+        # Centroids
+        centroids = np.frombuffer(f.read(n_centroids * n_dims * 4), dtype=np.float32).copy()
+        centroids = centroids.reshape(n_centroids, n_dims)
         
-        # Load inverted lists
-        legit_lists = []
-        for _ in range(n_centroids_legit):
+        # Labels
+        labels = np.frombuffer(f.read(n_vectors * 4), dtype=np.int32).copy()
+        
+        # Quantized vectors
+        vectors_q = np.frombuffer(f.read(n_vectors * n_dims), dtype=np.int8).copy()
+        vectors_q = vectors_q.reshape(n_vectors, n_dims)
+        
+        # Inverted lists
+        lists = []
+        for _ in range(n_centroids):
             count = struct.unpack("<I", f.read(4))[0]
             indices = struct.unpack(f"<{count}I", f.read(count * 4))
-            legit_lists.append(list(indices))
-        
-        fraud_lists = []
-        for _ in range(n_centroids_fraud):
-            count = struct.unpack("<I", f.read(4))[0]
-            indices = struct.unpack(f"<{count}I", f.read(count * 4))
-            fraud_lists.append(list(indices))
+            lists.append(np.array(indices, dtype=np.int32))
     
+    print(f"Index loaded: {n_vectors} vectors, {n_centroids} centroids")
     return {
-        "legit_vectors": legit_vectors,
-        "fraud_vectors": fraud_vectors,
-        "legit_centroids": legit_centroids,
-        "fraud_centroids": fraud_centroids,
-        "legit_lists": legit_lists,
-        "fraud_lists": fraud_lists,
+        "n_vectors": n_vectors,
+        "n_centroids": n_centroids,
+        "dim_min": dim_min,
+        "dim_scale": dim_scale,
+        "centroids": centroids,
+        "labels": labels,
+        "vectors_q": vectors_q,
+        "lists": lists,
     }
 
 
@@ -95,12 +73,12 @@ def load_json(path: Path):
 
 
 class FraudDetector:
-    """Fraud detection engine."""
+    """Fraud detection engine using IVF with int8."""
     
     def __init__(self, resources_path: Path, data_path: Path):
         self.normalization = load_json(resources_path / "normalization.json")
         self.mcc_risk = load_json(resources_path / "mcc_risk.json")
-        self.index = load_index(data_path / "rinha.idx")
+        self.data = load_index(data_path)
     
     def vectorize(self, payload: dict) -> np.ndarray:
         """Convert payload to 14-dimensional vector."""
@@ -135,7 +113,7 @@ class FraudDetector:
         vec[8] = clamp(customer["tx_count_24h"] / norm["max_tx_count_24h"])
         vec[9] = 1.0 if terminal["is_online"] else 0.0
         vec[10] = 1.0 if terminal["card_present"] else 0.0
-        # Convert list to set for O(1) lookup
+        
         known_merchants = set(customer["known_merchants"])
         vec[11] = 1.0 if merchant["id"] not in known_merchants else 0.0
         vec[12] = self.mcc_risk.get(merchant["mcc"], 0.5)
@@ -143,54 +121,47 @@ class FraudDetector:
         
         return vec
     
+    def quantize(self, vec: np.ndarray) -> np.ndarray:
+        """Quantize float32 vector to int8."""
+        d = self.data
+        return np.clip(
+            (vec - d["dim_min"]) * d["dim_scale"] - 127,
+            -128, 127
+        ).astype(np.int8)
+    
     def search(self, query: np.ndarray, k: int = 5) -> int:
-        """Search for k nearest neighbors, return fraud count."""
-        idx = self.index
+        """Search IVF index, return fraud count among k neighbors."""
+        d = self.data
         
-        # Find nearest centroid for each class
-        diff_legit = idx["legit_centroids"] - query
-        diff_fraud = idx["fraud_centroids"] - query
-        dists_legit = np.sum(diff_legit ** 2, axis=1)
-        dists_fraud = np.sum(diff_fraud ** 2, axis=1)
+        # Quantize query
+        query_q = self.quantize(query).astype(np.float32)
         
-        # Use only nearest centroid
-        top_legit_idx = np.argmin(dists_legit)
-        top_fraud_idx = np.argmin(dists_fraud)
+        # Find nearest centroid
+        diff = d["centroids"] - query_q
+        dists = np.sum(diff ** 2, axis=1)
+        top_centroid = np.argmin(dists)
         
-        max_candidates = 50  # Reduced for speed
+        # Get candidates from that centroid
+        candidates = d["lists"][top_centroid]
         
-        # Vectorized distance computation for legit candidates
-        legit_indices = idx["legit_lists"][top_legit_idx]
-        if len(legit_indices) > max_candidates:
-            step = len(legit_indices) // max_candidates
-            legit_indices = legit_indices[::step][:max_candidates]
+        # Limit candidates for speed
+        max_candidates = 100
+        if len(candidates) > max_candidates:
+            candidates = candidates[:max_candidates]
         
-        legit_vecs = idx["legit_vectors"][legit_indices]
-        legit_dists = np.sum((legit_vecs - query) ** 2, axis=1)
+        # Compute distances (int8 arithmetic)
+        candidate_vecs = d["vectors_q"][candidates].astype(np.float32)
+        dists = np.sum((candidate_vecs - query_q) ** 2, axis=1)
         
-        # Vectorized distance computation for fraud candidates
-        fraud_indices = idx["fraud_lists"][top_fraud_idx]
-        if len(fraud_indices) > max_candidates:
-            step = len(fraud_indices) // max_candidates
-            fraud_indices = fraud_indices[::step][:max_candidates]
-        
-        fraud_vecs = idx["fraud_vectors"][fraud_indices]
-        fraud_dists = np.sum((fraud_vecs - query) ** 2, axis=1)
-        
-        # Combine distances with labels
-        all_dists = np.concatenate([legit_dists, fraud_dists])
-        all_labels = np.concatenate([
-            np.zeros(len(legit_dists), dtype=np.int32),
-            np.ones(len(fraud_dists), dtype=np.int32)
-        ])
-        
-        if len(all_dists) < k:
+        # Get top-k
+        if len(dists) < k:
             return 0
         
-        # Use argpartition for O(N) instead of O(N log N) sort
-        top_k_indices = np.argpartition(all_dists, k)[:k]
-        fraud_count = np.sum(all_labels[top_k_indices])
-        return int(fraud_count)
+        top_k_local = np.argpartition(dists, k)[:k]
+        top_k_indices = candidates[top_k_local]
+        
+        # Count frauds
+        return int(np.sum(d["labels"][top_k_indices]))
     
     def detect(self, payload: dict) -> dict:
         """Detect fraud for a transaction."""
@@ -233,7 +204,6 @@ async def app(scope, receive, send):
 async def handle_fraud_score(scope, receive, send):
     """Handle POST /fraud-score request."""
     try:
-        # Read request body
         body = b""
         more_body = True
         while more_body:
@@ -241,13 +211,8 @@ async def handle_fraud_score(scope, receive, send):
             body += message.get("body", b"")
             more_body = message.get("more_body", False)
         
-        # Parse JSON with orjson (fast)
         data = orjson.loads(body)
-        
-        # Detect fraud
         result = detector.detect(data)
-        
-        # Send response
         await send_json(send, orjson.dumps(result))
     except Exception:
         await send_json(send, RESPONSE_SAFE)
