@@ -1,12 +1,11 @@
-"""HTTP server for fraud detection API."""
+"""ASGI HTTP server for fraud detection API."""
 
-import json
 import struct
 from datetime import datetime
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 import numpy as np
+import orjson
 
 
 def clamp(x: float) -> float:
@@ -91,8 +90,8 @@ def load_index(path: Path):
 
 def load_json(path: Path):
     """Load JSON file."""
-    with open(path, "r") as f:
-        return json.load(f)
+    with open(path, "rb") as f:
+        return orjson.loads(f.read())
 
 
 class FraudDetector:
@@ -200,60 +199,78 @@ class FraudDetector:
         return {"approved": approved, "fraud_score": fraud_score}
 
 
+# Initialize detector at module load
 detector: FraudDetector = None
 
+# Pre-encoded responses
+RESPONSE_READY = orjson.dumps({"status": "ready"})
+RESPONSE_SAFE = orjson.dumps({"approved": True, "fraud_score": 0.0})
 
-class FraudHandler(BaseHTTPRequestHandler):
-    protocol_version = 'HTTP/1.1'
-    
-    def log_message(self, format, *args):
-        pass
-    
-    def do_GET(self):
-        if self.path == "/ready":
-            self._send_json({"status": "ready"}, status=200)
+# Initialize detector
+resources_path = Path(__file__).parent.parent / "resources"
+data_path = Path(__file__).parent.parent / "data"
+print("Loading index...")
+detector = FraudDetector(resources_path, data_path)
+print("Index loaded")
+
+
+async def app(scope, receive, send):
+    """ASGI application for fraud detection."""
+    if scope["type"] == "http":
+        path = scope["path"]
+        method = scope["method"]
+        
+        if method == "GET" and path == "/ready":
+            await send_json(send, RESPONSE_READY)
+        elif method == "POST" and path == "/fraud-score":
+            await handle_fraud_score(scope, receive, send)
         else:
-            self._safe_response()
-    
-    def do_POST(self):
-        if self.path == "/fraud-score":
-            try:
-                content_length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(content_length)
-                data = json.loads(body)
-                response = detector.detect(data)
-                self._send_json(response)
-            except Exception:
-                self._safe_response()
-        else:
-            self._safe_response()
-    
-    def _send_json(self, data, status=200):
-        response_body = json.dumps(data).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", len(response_body))
-        self.send_header("Connection", "keep-alive")
-        self.end_headers()
-        self.wfile.write(response_body)
-    
-    def _safe_response(self):
-        self._send_json({"approved": True, "fraud_score": 0.0})
+            await send_json(send, RESPONSE_SAFE)
+
+
+async def handle_fraud_score(scope, receive, send):
+    """Handle POST /fraud-score request."""
+    try:
+        # Read request body
+        body = b""
+        more_body = True
+        while more_body:
+            message = await receive()
+            body += message.get("body", b"")
+            more_body = message.get("more_body", False)
+        
+        # Parse JSON with orjson (fast)
+        data = orjson.loads(body)
+        
+        # Detect fraud
+        result = detector.detect(data)
+        
+        # Send response
+        await send_json(send, orjson.dumps(result))
+    except Exception:
+        await send_json(send, RESPONSE_SAFE)
+
+
+async def send_json(send, body: bytes, status: int = 200):
+    """Send JSON response."""
+    await send({
+        "type": "http.response.start",
+        "status": status,
+        "headers": [
+            [b"content-type", b"application/json"],
+            [b"content-length", str(len(body)).encode()],
+        ],
+    })
+    await send({
+        "type": "http.response.body",
+        "body": body,
+    })
 
 
 def main():
-    global detector
-    
-    resources_path = Path(__file__).parent.parent / "resources"
-    data_path = Path(__file__).parent.parent / "data"
-    
-    print("Loading index...")
-    detector = FraudDetector(resources_path, data_path)
-    print("Index loaded")
-    
-    server = ThreadingHTTPServer(("0.0.0.0", 8000), FraudHandler)
-    print("Server running on port 8000")
-    server.serve_forever()
+    """Run server (for local development)."""
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="error")
 
 
 if __name__ == "__main__":
