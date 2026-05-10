@@ -135,7 +135,9 @@ class FraudDetector:
         vec[8] = clamp(customer["tx_count_24h"] / norm["max_tx_count_24h"])
         vec[9] = 1.0 if terminal["is_online"] else 0.0
         vec[10] = 1.0 if terminal["card_present"] else 0.0
-        vec[11] = 1.0 if merchant["id"] not in customer["known_merchants"] else 0.0
+        # Convert list to set for O(1) lookup
+        known_merchants = set(customer["known_merchants"])
+        vec[11] = 1.0 if merchant["id"] not in known_merchants else 0.0
         vec[12] = self.mcc_risk.get(merchant["mcc"], 0.5)
         vec[13] = clamp(merchant["avg_amount"] / norm["max_merchant_avg_amount"])
         
