@@ -145,7 +145,7 @@ class FraudDetector:
         candidates = d["lists"][top_centroid]
         
         # Limit candidates for speed
-        max_candidates = 100
+        max_candidates = 50
         if len(candidates) > max_candidates:
             candidates = candidates[:max_candidates]
         
