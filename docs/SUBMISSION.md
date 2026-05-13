@@ -93,6 +93,25 @@ There are two testing moments in Rinha:
 
 This year, Rinha runs on a [Mac Mini Late 2014](https://support.apple.com/en-us/111931) with Ubuntu 24.04.
 
+## Process note
+
+For the `mpraes` submission, the participant registration PR in the upstream Rinha repository should use the same minimal JSON format as the accepted examples:
+
+```json
+[
+    {
+        "id": "rinha-2026-python2",
+        "repo": "https://github.com/mpraes/rinha-2026-python2"
+    },
+    {
+        "id": "rinha-2026-python1",
+        "repo": "https://github.com/mpraes/rinha-2026-python1"
+    }
+]
+```
+
+The PR title that matched the accepted pattern was `participants: update mpraes submission IDs`. The backend repository itself keeps `main` with source code and `submission` with only the runtime files required by the test.
+
 Specs:
 
 - 2.6 GHz
