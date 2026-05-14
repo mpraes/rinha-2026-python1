@@ -1,7 +1,7 @@
 services:
   api1:
     platform: linux/amd64
-    image: ghcr.io/mpraes/rinha-2026-python1:latest
+    image: rmoraes4/rinha-2026-python1:latest
     environment:
       - PORT=8000
     networks:
@@ -14,7 +14,7 @@ services:
 
   api2:
     platform: linux/amd64
-    image: ghcr.io/mpraes/rinha-2026-python1:latest
+    image: rmoraes4/rinha-2026-python1:latest
     environment:
       - PORT=8000
     networks:
