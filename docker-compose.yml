@@ -1,9 +1,11 @@
 services:
-  api1: &api
-    image: rinha-fraud-2026:latest
+  api1:
+    platform: linux/amd64
     build: .
     environment:
       - PORT=8000
+    networks:
+      - rinha
     deploy:
       resources:
         limits:
@@ -11,12 +13,21 @@ services:
           memory: "160M"
 
   api2:
-    <<: *api
-    build: !reset null
+    platform: linux/amd64
+    build: .
+    environment:
+      - PORT=8000
+    networks:
+      - rinha
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "160M"
 
   lb:
+    platform: linux/amd64
     image: nginx:alpine
-    restart: always
     depends_on:
       - api1
       - api2
@@ -24,8 +35,14 @@ services:
       - "9999:9999"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - rinha
     deploy:
       resources:
         limits:
           cpus: "0.1"
           memory: "30M"
+
+networks:
+  rinha:
+    driver: bridge

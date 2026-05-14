@@ -1,0 +1,219 @@
+Metadata-Version: 2.4
+Name: rinha-fraud-detection
+Version: 1.0.0
+Summary: Fraud detection API for Rinha de Backend 2026
+Author-email: Renan de Moraes <renan@example.com>
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy>=1.24.0
+Requires-Dist: uvicorn[standard]>=0.30.0
+Requires-Dist: orjson>=3.10.0
+Requires-Dist: ijson>=3.2.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Dynamic: license-file
+
+# Rinha de Backend 2026 - Python Fraud Detection API
+
+[English](#english) | [Português](#português)
+
+---
+
+<a name="english"></a>
+## English
+
+A high-performance fraud detection API built for **Rinha de Backend 2026**, implementing vector search for real-time credit card transaction analysis.
+
+### Overview
+
+This solution implements a fraud detection system that:
+- Transforms transaction payloads into 14-dimensional vectors
+- Uses IVF (Inverted File Index) with **int8 quantization** for efficient nearest neighbor search
+- Returns approval decisions with fraud scores in **under 1ms** (p99: ~0.47ms)
+
+### Tech Stack
+
+- **Python 3.12** - Runtime environment
+- **NumPy** - Vectorized operations for fast distance calculations
+- **ijson** - Streaming JSON parser for memory-efficient data loading
+- **uvicorn + orjson** - High-performance ASGI server with fast JSON serialization
+- **Nginx** - Load balancer with keep-alive connection pooling
+- **Docker** - Containerized deployment
+
+### Architecture
+
+```
+Client → Nginx (port 9999) → API Instance 1 (round-robin)
+                             → API Instance 2 (round-robin)
+```
+
+**Resource Constraints:**
+- Total CPU: 1 core (split: 0.45 + 0.45 + 0.1)
+- Total Memory: 350 MB (split: 140M + 140M + 70M)
+- 2 API instances + 1 load balancer
+
+**Actual Memory Usage:** ~96 MB per API instance ✅
+
+### How It Works
+
+1. **Vectorization**: Each transaction is converted to a 14-dimensional normalized vector
+2. **Quantization**: Vectors are quantized to **int8** (4x smaller, faster cache)
+3. **Clustering**: Reference vectors are pre-clustered using k-means (64 centroids)
+4. **Search**: Find nearest centroid, then search only within that cluster (100 candidates max)
+5. **Decision**: Among 5 nearest neighbors, count frauds → `fraud_score = frauds / 5`
+6. **Response**: `approved = fraud_score < 0.6`
+
+### Key Optimizations
+
+| Optimization | Benefit |
+|-------------|---------|
+| **int8 Quantization** | 4x smaller vectors (14 bytes vs 56 bytes), better cache utilization |
+| **IVF Clustering** | O(1) centroid lookup + O(100) distance calculations per query |
+| **Streaming JSON (ijson)** | Memory-efficient parsing of 284 MB reference file |
+| **RAM-loaded index** | ~51.5 MB total at runtime (well within limits) |
+| **HTTP keep-alive** | Persistent connections between nginx and API instances |
+| **orjson** | Fast JSON serialization/deserialization |
+
+### Performance
+
+| Metric | Value |
+|--------|-------|
+| p50 latency | < 0.01 ms |
+| p95 latency | ~0.35 ms |
+| **p99 latency** | **~0.47 ms** ✅ (target: < 1ms for +3000 points) |
+| Index size | 62.95 MB |
+| Runtime memory per API | ~96 MB |
+| Total memory | ~222 MB (within 350 MB limit) |
+
+### Running Locally
+
+```bash
+# Build and run
+docker compose up --build
+
+# Test endpoints
+curl http://localhost:9999/ready
+curl -X POST http://localhost:9999/fraud-score \
+  -H "Content-Type: application/json" \
+  -d '{"id":"test","transaction":{"amount":100,"installments":1,"requested_at":"2026-03-11T20:23:35Z"},"customer":{"avg_amount":100,"tx_count_24h":1,"known_merchants":[]},"merchant":{"id":"MERC-001","mcc":"5912","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":10},"last_transaction":null}'
+```
+
+### Project Structure
+
+```
+├── src/
+│   ├── server.py       # ASGI HTTP server with fraud detection logic
+│   └── pack.py         # Index generation with streaming JSON parsing
+├── resources/          # Reference data (mcc_risk.json, normalization.json)
+├── Dockerfile          # Multi-stage build with g++ for extensions
+├── docker-compose.yml  # Service orchestration
+├── nginx.conf          # Load balancer configuration with keep-alive
+└── requirements.txt    # Dependencies (numpy, uvicorn, orjson, ijson)
+```
+
+---
+
+<a name="português"></a>
+## Português
+
+Uma API de detecção de fraude de alta performance desenvolvida para a **Rinha de Backend 2026**, implementando busca vetorial para análise de transações de cartão de crédito em tempo real.
+
+### Visão Geral
+
+Esta solução implementa um sistema de detecção de fraude que:
+- Transforma payloads de transações em vetores de 14 dimensões
+- Utiliza IVF (Inverted File Index) com **quantização int8** para busca eficiente de vizinhos mais próximos
+- Retorna decisões de aprovação com pontuações de fraude em **menos de 1ms** (p99: ~0.47ms)
+
+### Stack Tecnológica
+
+- **Python 3.12** - Ambiente de execução
+- **NumPy** - Operações vetorizadas para cálculos de distância rápidos
+- **ijson** - Parser JSON em streaming para carregamento eficiente de dados
+- **uvicorn + orjson** - Servidor ASGI de alta performance com serialização JSON rápida
+- **Nginx** - Load balancer com pooling de conexões keep-alive
+- **Docker** - Implantação containerizada
+
+### Arquitetura
+
+```
+Cliente → Nginx (porta 9999) → Instância API 1 (round-robin)
+                                → Instância API 2 (round-robin)
+```
+
+**Restrições de Recursos:**
+- CPU Total: 1 núcleo (divisão: 0.45 + 0.45 + 0.1)
+- Memória Total: 350 MB (divisão: 140M + 140M + 70M)
+- 2 instâncias API + 1 load balancer
+
+**Uso Real de Memória:** ~96 MB por instância API ✅
+
+### Como Funciona
+
+1. **Vetorização**: Cada transação é convertida em um vetor normalizado de 14 dimensões
+2. **Quantização**: Vetores são quantizados para **int8** (4x menor, melhor uso de cache)
+3. **Clustering**: Vetores de referência são pré-agrupados usando k-means (64 centróides)
+4. **Busca**: Encontra o centróide mais próximo, depois busca apenas naquele cluster (máx 100 candidatos)
+5. **Decisão**: Entre os 5 vizinhos mais próximos, conta fraudes → `fraud_score = fraudes / 5`
+6. **Resposta**: `approved = fraud_score < 0.6`
+
+### Otimizações Chave
+
+| Otimização | Benefício |
+|------------|-----------|
+| **Quantização int8** | Vetores 4x menores (14 bytes vs 56 bytes), melhor utilização de cache |
+| **Clustering IVF** | Busca de centróide O(1) + O(100) cálculos de distância por consulta |
+| **JSON em streaming (ijson)** | Parsing eficiente de 284 MB de dados de referência |
+| **Índice carregado na RAM** | ~51.5 MB total em runtime (dentro dos limites) |
+| **HTTP keep-alive** | Conexões persistentes entre nginx e instâncias API |
+| **orjson** | Serialização/deserialização JSON rápida |
+
+### Performance
+
+| Métrica | Valor |
+|---------|-------|
+| Latência p50 | < 0.01 ms |
+| Latência p95 | ~0.35 ms |
+| **Latência p99** | **~0.47 ms** ✅ (alvo: < 1ms para +3000 pontos) |
+| Tamanho do índice | 62.95 MB |
+| Memória por API em runtime | ~96 MB |
+| Memória total | ~222 MB (dentro do limite de 350 MB) |
+
+### Executando Localmente
+
+```bash
+# Construir e executar
+docker compose up --build
+
+# Testar endpoints
+curl http://localhost:9999/ready
+curl -X POST http://localhost:9999/fraud-score \
+  -H "Content-Type: application/json" \
+  -d '{"id":"test","transaction":{"amount":100,"installments":1,"requested_at":"2026-03-11T20:23:35Z"},"customer":{"avg_amount":100,"tx_count_24h":1,"known_merchants":[]},"merchant":{"id":"MERC-001","mcc":"5912","avg_amount":100},"terminal":{"is_online":false,"card_present":true,"km_from_home":10},"last_transaction":null}'
+```
+
+### Estrutura do Projeto
+
+```
+├── src/
+│   ├── server.py       # Servidor ASGI HTTP com lógica de detecção de fraude
+│   └── pack.py         # Geração de índice com parsing JSON em streaming
+├── resources/          # Dados de referência (mcc_risk.json, normalization.json)
+├── Dockerfile          # Build multi-stage com g++ para extensões
+├── docker-compose.yml  # Orquestração de serviços
+├── nginx.conf          # Configuração do load balancer com keep-alive
+└── requirements.txt    # Dependências (numpy, uvicorn, orjson, ijson)
+```
+
+---
+
+## Author / Autor
+
+**Renan de Moraes**
+- GitHub: [@mpraes](https://github.com/mpraes)
+- Open to work: Yes ✅
+
+## License
+
+MIT License - See [LICENSE](LICENSE) for details.
