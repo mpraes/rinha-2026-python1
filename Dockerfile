@@ -9,7 +9,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt setuptools
+
+COPY src/_fraud.c ./src/_fraud.c
+COPY setup.py ./
+RUN python setup.py build_ext --inplace
 
 COPY src ./src
 COPY resources ./resources
