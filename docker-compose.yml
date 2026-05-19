@@ -1,7 +1,7 @@
 services:
   api1:
     platform: linux/amd64
-    image: rmoraes4/rinha-2026-python1:latest
+    image: rmoraes4/rinha-2026-python1@sha256:1e6ff8ef2d80595a88af71d00e729e1bbf50be40a9cc6924faf5d783ab99f512
     environment:
       - PORT=8000
     networks:
@@ -14,7 +14,7 @@ services:
 
   api2:
     platform: linux/amd64
-    image: rmoraes4/rinha-2026-python1:latest
+    image: rmoraes4/rinha-2026-python1@sha256:1e6ff8ef2d80595a88af71d00e729e1bbf50be40a9cc6924faf5d783ab99f512
     environment:
       - PORT=8000
     networks:
