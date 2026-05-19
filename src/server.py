@@ -1,13 +1,20 @@
 """ASGI HTTP server for fraud detection API with IVF + int8."""
 
 import struct
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import orjson
 
 
+def clamp(x: float) -> float:
+    """Clamp value to [0.0, 1.0]."""
+    return max(0.0, min(1.0, x))
+
+
 def load_index(data_path: Path):
+    """Load IVF index with int8 quantization."""
     index_file = data_path / "rinha.idx"
     
     print(f"Loading index from {index_file}...")
@@ -24,17 +31,22 @@ def load_index(data_path: Path):
         n_centroids = struct.unpack("<I", f.read(4))[0]
         n_dims = struct.unpack("<I", f.read(4))[0]
         
+        # Quantization params
         dim_min = np.frombuffer(f.read(n_dims * 4), dtype=np.float32).copy()
         dim_scale = np.frombuffer(f.read(n_dims * 4), dtype=np.float32).copy()
         
+        # Centroids
         centroids = np.frombuffer(f.read(n_centroids * n_dims * 4), dtype=np.float32).copy()
         centroids = centroids.reshape(n_centroids, n_dims)
         
+        # Labels
         labels = np.frombuffer(f.read(n_vectors * 4), dtype=np.int32).copy()
         
+        # Quantized vectors
         vectors_q = np.frombuffer(f.read(n_vectors * n_dims), dtype=np.int8).copy()
         vectors_q = vectors_q.reshape(n_vectors, n_dims)
         
+        # Inverted lists
         lists = []
         for _ in range(n_centroids):
             count = struct.unpack("<I", f.read(4))[0]
@@ -60,197 +72,115 @@ def load_index(data_path: Path):
 
 
 def load_json(path: Path):
+    """Load JSON file."""
     with open(path, "rb") as f:
         return orjson.loads(f.read())
 
 
-def _build_weekday_lut():
-    from datetime import datetime
-    lut = {}
-    for year in range(2024, 2029):
-        for m in range(1, 13):
-            for d in range(1, 32):
-                try:
-                    lut[year * 10000 + m * 100 + d] = datetime(year, m, d).weekday()
-                except ValueError:
-                    pass
-    return lut
-
-_WEEKDAY_LUT = _build_weekday_lut()
-
-
 class FraudDetector:
+    """Fraud detection engine using IVF with int8."""
     
     def __init__(self, resources_path: Path, data_path: Path):
         self.normalization = load_json(resources_path / "normalization.json")
         self.mcc_risk = load_json(resources_path / "mcc_risk.json")
         self.data = load_index(data_path)
-        
-        d = self.data
-        n = self.normalization
-        self._max_amount = float(n["max_amount"])
-        self._max_installments = float(n["max_installments"])
-        self._amount_vs_avg_ratio = float(n["amount_vs_avg_ratio"])
-        self._max_minutes = float(n["max_minutes"])
-        self._max_km = float(n["max_km"])
-        self._max_tx_count_24h = float(n["max_tx_count_24h"])
-        self._max_merchant_avg_amount = float(n["max_merchant_avg_amount"])
-        
-        self._dim_min = d["dim_min"]
-        self._dim_scale = d["dim_scale"]
-        self._centroids = d["centroids"]
-        self._labels = d["labels"]
-        self._vectors_q = d["vectors_q"]
-        self._lists = d["lists"]
-        
-        self._query_buf = np.zeros(14, dtype=np.float32)
-        self._query_q_buf = np.zeros(14, dtype=np.float32)
-        self._centroid_dists_buf = np.zeros(d["n_centroids"], dtype=np.float32)
     
-    def detect(self, payload: dict) -> dict:
+    def vectorize(self, payload: dict) -> np.ndarray:
+        """Convert payload to 14-dimensional vector."""
         tx = payload["transaction"]
         customer = payload["customer"]
         merchant = payload["merchant"]
         terminal = payload["terminal"]
         last_tx = payload.get("last_transaction")
         
-        vec = self._query_buf
-        inv_max_amount = 1.0 / self._max_amount
-        inv_max_installments = 1.0 / self._max_installments
-        inv_ratio = 1.0 / self._amount_vs_avg_ratio
-        inv_max_minutes = 1.0 / self._max_minutes
-        inv_max_km = 1.0 / self._max_km
-        inv_max_tx_count = 1.0 / self._max_tx_count_24h
-        inv_max_merchant_avg = 1.0 / self._max_merchant_avg_amount
+        norm = self.normalization
         
-        a = tx["amount"]
-        vec[0] = a * inv_max_amount if a < self._max_amount else 1.0
+        vec = np.zeros(14, dtype=np.float32)
         
-        inst = tx["installments"]
-        vec[1] = inst * inv_max_installments if inst < self._max_installments else 1.0
+        vec[0] = clamp(tx["amount"] / norm["max_amount"])
+        vec[1] = clamp(tx["installments"] / norm["max_installments"])
+        vec[2] = clamp((tx["amount"] / customer["avg_amount"]) / norm["amount_vs_avg_ratio"])
         
-        avg = customer["avg_amount"]
-        ratio = a / avg * inv_ratio if avg > 0 else 0.0
-        vec[2] = ratio if 0.0 <= ratio <= 1.0 else (1.0 if ratio > 1.0 else 0.0)
-        
-        ra = tx["requested_at"]
-        hour = int(ra[11:13])
-        vec[3] = hour * (1.0 / 23.0)
-        ymd = int(ra[0:4]) * 10000 + int(ra[5:7]) * 100 + int(ra[8:10])
-        vec[4] = _WEEKDAY_LUT.get(ymd, 0) * (1.0 / 6.0)
+        dt = datetime.fromisoformat(tx["requested_at"].replace("Z", "+00:00"))
+        vec[3] = dt.hour / 23.0
+        vec[4] = dt.weekday() / 6.0
         
         if last_tx is None:
             vec[5] = -1.0
             vec[6] = -1.0
         else:
-            lra = last_tx["timestamp"]
-            cur_min = int(ra[11:13]) * 60 + int(ra[14:16])
-            last_min = int(lra[11:13]) * 60 + int(lra[14:16])
-            cur_day = int(ra[8:10])
-            last_day = int(lra[8:10])
-            minutes = cur_min - last_min + (cur_day - last_day) * 1440
-            if minutes < 0:
-                minutes = 0
-            m = minutes * inv_max_minutes
-            vec[5] = m if m < 1.0 else 1.0
-            
-            km = last_tx["km_from_current"]
-            k = km * inv_max_km
-            vec[6] = k if k < 1.0 else 1.0
+            last_dt = datetime.fromisoformat(last_tx["timestamp"].replace("Z", "+00:00"))
+            minutes = (dt - last_dt).total_seconds() / 60.0
+            vec[5] = clamp(minutes / norm["max_minutes"])
+            vec[6] = clamp(last_tx["km_from_current"] / norm["max_km"])
         
-        km_home = terminal["km_from_home"]
-        k7 = km_home * inv_max_km
-        vec[7] = k7 if k7 < 1.0 else 1.0
-        
-        tc = customer["tx_count_24h"]
-        vec[8] = tc * inv_max_tx_count if tc < self._max_tx_count_24h else 1.0
-        
+        vec[7] = clamp(terminal["km_from_home"] / norm["max_km"])
+        vec[8] = clamp(customer["tx_count_24h"] / norm["max_tx_count_24h"])
         vec[9] = 1.0 if terminal["is_online"] else 0.0
         vec[10] = 1.0 if terminal["card_present"] else 0.0
         
-        mid = merchant["id"]
-        vec[11] = 0.0 if mid in customer["known_merchants"] else 1.0
-        
+        known_merchants = set(customer["known_merchants"])
+        vec[11] = 1.0 if merchant["id"] not in known_merchants else 0.0
         vec[12] = self.mcc_risk.get(merchant["mcc"], 0.5)
+        vec[13] = clamp(merchant["avg_amount"] / norm["max_merchant_avg_amount"])
         
-        ma = merchant["avg_amount"]
-        vec[13] = ma * inv_max_merchant_avg if ma < self._max_merchant_avg_amount else 1.0
-        
-        query_q = self._query_q_buf
-        dim_min = self._dim_min
-        dim_scale = self._dim_scale
-        for i in range(14):
-            v = (vec[i] - dim_min[i]) * dim_scale[i] - 127.0
-            if v < -128.0: v = -128.0
-            elif v > 127.0: v = 127.0
-            query_q[i] = v
-        
+        return vec
+    
+    def quantize(self, vec: np.ndarray) -> np.ndarray:
+        """Quantize float32 vector to int8."""
         d = self.data
-        centroids = self._centroids
-        cdists = self._centroid_dists_buf
-        nc = d["n_centroids"]
-        
-        min0 = 1e30
-        min1 = 1e30
-        cid0 = 0
-        cid1 = 0
-        for c in range(nc):
-            dist = 0.0
-            for j in range(14):
-                diff = centroids[c, j] - query_q[j]
-                dist += diff * diff
-            if dist < min0:
-                min1 = min0; cid1 = cid0
-                min0 = dist; cid0 = c
-            elif dist < min1:
-                min1 = dist; cid1 = c
-        
-        lists = self._lists
-        labels = self._labels
-        vectors_q = self._vectors_q
-        
-        lst0 = lists[cid0]
-        lst1 = lists[cid1]
-        lim0 = min(len(lst0), 200)
-        lim1 = min(len(lst1), 200)
-        n_cand = lim0 + lim1
-        
-        best5_d = [1e30] * 5
-        best5_i = [0] * 5
-        
-        for batch_lst, batch_lim in ((lst0, lim0), (lst1, lim1)):
-            for i in range(batch_lim):
-                idx = batch_lst[i]
-                dist = 0.0
-                vrow = vectors_q[idx]
-                for j in range(14):
-                    diff = float(vrow[j]) - query_q[j]
-                    dist += diff * diff
-                if dist < best5_d[4]:
-                    pos = 4
-                    while pos > 0 and dist < best5_d[pos - 1]:
-                        pos -= 1
-                    for s in range(4, pos, -1):
-                        best5_d[s] = best5_d[s - 1]
-                        best5_i[s] = best5_i[s - 1]
-                    best5_d[pos] = dist
-                    best5_i[pos] = idx
-        
-        fraud_count = 0
-        for i in range(5):
-            if labels[best5_i[i]] == 1:
-                fraud_count += 1
-        
-        fraud_score = fraud_count * 0.2
+        return np.clip(
+            (vec - d["dim_min"]) * d["dim_scale"] - 127,
+            -128, 127
+        ).astype(np.int8)
+    
+    def search(self, query: np.ndarray, k: int = 5) -> int:
+        """Search IVF index, return fraud count among k neighbors."""
+        d = self.data
+        max_candidates = 200
+
+        query_q = self.quantize(query).astype(np.float32)
+
+        diff = d["centroids"] - query_q
+        dists = np.sum(diff ** 2, axis=1)
+        top_centroids = np.argpartition(dists, 2)[:2]
+
+        all_candidates = []
+        for cid in top_centroids:
+            lst = d["lists"][cid]
+            if len(lst) > max_candidates:
+                lst = lst[:max_candidates]
+            all_candidates.append(lst)
+        candidates = np.concatenate(all_candidates)
+
+        candidate_vecs = d["vectors_q"][candidates].astype(np.float32)
+        dists = np.sum((candidate_vecs - query_q) ** 2, axis=1)
+
+        if len(dists) < k:
+            return 0
+
+        top_k_local = np.argpartition(dists, k)[:k]
+        top_k_indices = candidates[top_k_local]
+
+        return int(np.sum(d["labels"][top_k_indices]))
+    
+    def detect(self, payload: dict) -> dict:
+        """Detect fraud for a transaction."""
+        vec = self.vectorize(payload)
+        fraud_count = self.search(vec, k=5)
+        fraud_score = fraud_count / 5.0
         approved = fraud_score < 0.6
         return {"approved": approved, "fraud_score": fraud_score}
 
 
+# Initialize detector at module load
 detector: FraudDetector = None
 
+# Pre-encoded responses
 RESPONSE_READY = orjson.dumps({"status": "ready"})
 RESPONSE_SAFE = orjson.dumps({"approved": True, "fraud_score": 0.0})
 
+# Initialize detector
 resources_path = Path(__file__).parent.parent / "resources"
 data_path = Path(__file__).parent.parent / "data"
 print("Loading index...")
@@ -259,6 +189,7 @@ print("Index loaded")
 
 
 async def app(scope, receive, send):
+    """ASGI application for fraud detection."""
     if scope["type"] == "http":
         path = scope["path"]
         method = scope["method"]
@@ -272,6 +203,7 @@ async def app(scope, receive, send):
 
 
 async def handle_fraud_score(scope, receive, send):
+    """Handle POST /fraud-score request."""
     try:
         body = b""
         more_body = True
@@ -288,6 +220,7 @@ async def handle_fraud_score(scope, receive, send):
 
 
 async def send_json(send, body: bytes, status: int = 200):
+    """Send JSON response."""
     await send({
         "type": "http.response.start",
         "status": status,
@@ -303,6 +236,7 @@ async def send_json(send, body: bytes, status: int = 200):
 
 
 def main():
+    """Run server (for local development)."""
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="error")
 
