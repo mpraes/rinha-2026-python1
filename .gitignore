@@ -152,3 +152,10 @@ dist/
 .venv/
 venv/
 env/
+# Legacy and generated artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+data/rinha.idx
+test/results.json
