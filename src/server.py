@@ -137,16 +137,20 @@ class FraudDetector:
     def search(self, query: np.ndarray, k: int = 5) -> int:
         """Search IVF index, return fraud count among k neighbors."""
         d = self.data
+        max_candidates = 200
 
         query_q = self.quantize(query).astype(np.float32)
 
         diff = d["centroids"] - query_q
         dists = np.sum(diff ** 2, axis=1)
-        top_centroids = np.argpartition(dists, 3)[:3]
+        top_centroids = np.argpartition(dists, 2)[:2]
 
         all_candidates = []
         for cid in top_centroids:
-            all_candidates.append(d["lists"][cid])
+            lst = d["lists"][cid]
+            if len(lst) > max_candidates:
+                lst = lst[:max_candidates]
+            all_candidates.append(lst)
         candidates = np.concatenate(all_candidates)
 
         candidate_vecs = d["vectors_q"][candidates].astype(np.float32)
