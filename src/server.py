@@ -53,6 +53,11 @@ def load_index(data_path: Path):
             indices = struct.unpack(f"<{count}I", f.read(count * 4))
             lists.append(np.array(indices, dtype=np.int32))
     
+    vectors_q = np.ascontiguousarray(vectors_q)
+    vectors_q.flags.writeable = False
+    labels.flags.writeable = False
+    centroids.flags.writeable = False
+
     print(f"Index loaded: {n_vectors} vectors, {n_centroids} centroids")
     return {
         "n_vectors": n_vectors,
@@ -132,35 +137,27 @@ class FraudDetector:
     def search(self, query: np.ndarray, k: int = 5) -> int:
         """Search IVF index, return fraud count among k neighbors."""
         d = self.data
-        
-        # Quantize query
+
         query_q = self.quantize(query).astype(np.float32)
-        
-        # Find nearest centroid
+
         diff = d["centroids"] - query_q
         dists = np.sum(diff ** 2, axis=1)
-        top_centroid = np.argmin(dists)
-        
-        # Get candidates from that centroid
-        candidates = d["lists"][top_centroid]
-        
-        # Limit candidates for speed
-        max_candidates = 50
-        if len(candidates) > max_candidates:
-            candidates = candidates[:max_candidates]
-        
-        # Compute distances (int8 arithmetic)
+        top_centroids = np.argpartition(dists, 3)[:3]
+
+        all_candidates = []
+        for cid in top_centroids:
+            all_candidates.append(d["lists"][cid])
+        candidates = np.concatenate(all_candidates)
+
         candidate_vecs = d["vectors_q"][candidates].astype(np.float32)
         dists = np.sum((candidate_vecs - query_q) ** 2, axis=1)
-        
-        # Get top-k
+
         if len(dists) < k:
             return 0
-        
+
         top_k_local = np.argpartition(dists, k)[:k]
         top_k_indices = candidates[top_k_local]
-        
-        # Count frauds
+
         return int(np.sum(d["labels"][top_k_indices]))
     
     def detect(self, payload: dict) -> dict:

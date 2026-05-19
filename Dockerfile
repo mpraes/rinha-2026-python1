@@ -31,4 +31,4 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
-ENTRYPOINT ["python", "-m", "uvicorn", "src.server:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "error"]
+ENTRYPOINT ["python", "-m", "uvicorn", "src.server:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "error", "--timeout-keep-alive", "30", "--limit-concurrency", "500"]

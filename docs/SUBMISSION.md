@@ -1,108 +1,128 @@
-# Submission
+# Submission Guide — rinha-2026-python1
 
-This page describes how you can take part in Rinha de Backend 2026.
+Step-by-step instructions to deploy and test this backend on the official Rinha environment.
 
-## Important!
+## Prerequisites
 
-- To participate in Rinha, all your repositories must be under the MIT license.
-- Using the test payloads as a lookup is not allowed.
-- If you disrupt the event, you will be removed without prior notice.
+- Docker + Docker Compose on the build machine
+- Git with push access to `https://github.com/mpraes/rinha-2026-python1`
+- Public repository under MIT license
 
-## Registration
+## 1. Build and verify locally
 
-To register your backend for official testing, you need to open a [pull request](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/creating-a-pull-request) that adds a file with your participation details. An example:
-
-```json
-[{
-    "id": "ana-elixir",
-    "repo": "https://github.com/ana/rinha-de-backend-2026-ana-elixir"
-}]
+```bash
+make pack                    # Generate data/rinha.idx from resources
+docker compose up --build    # Build image + start stack
 ```
 
-The file holds an array, so you can submit more than one backend if you want. For example:
+Smoke test:
 
-```json
-[{
-    "id": "ana-elixir",
-    "repo": "https://github.com/ana/rinha-de-backend-2026-ana-elixir"
-},
-{
-    "id": "ana-experimental",
-    "repo": "https://github.com/ana/rinha-de-backend-2026-ana-experimental"
-},
-{
-    "id": "ana-custom-vector-db",
-    "repo": "https://github.com/ana/rinha-de-backend-2026-custom-vector-db"
-}]
+```bash
+curl -s http://localhost:9999/ready
+curl -s -X POST http://localhost:9999/fraud-score \
+  -H 'Content-Type: application/json' \
+  -d @resources/example-payloads.json
 ```
 
-The filename must be exactly your github.com username, placed inside the [./participants](./participants) directory — for example, `./participants/ana.json`. Your git repository also needs to be and remain public.
+Run the full k6 test:
 
-## Repository structure
+```bash
+k6 run test/test.js
+```
 
-Your repository must have at least two branches:
+## 2. Prepare the `submission` branch
 
-- The main branch — usually called `main` — which holds your backend source code.
-- A branch called `submission`. This branch must contain only the files needed to run the test, and it cannot contain the source code.
+The `submission` branch must contain **only runtime files** — no source code.
 
-Here is an example of the directory structure on each branch:
+```bash
+# Switch to submission branch (create if needed)
+git checkout submission || git checkout -b submission
+
+# Remove everything that isn't a runtime file
+git rm -r --cached src/ docs/ resources/ scripts/ test/ 2>/dev/null || true
+git rm --cached Makefile pyproject.toml requirements.txt README.md LICENSE EXAMPLES.md LOCAL_TESTING.md QUICK_TEST.md AGENTS.md .gitignore .dockerignore 2>/dev/null || true
+
+# Ensure runtime files are present
+git add docker-compose.yml nginx.conf info.json Dockerfile
+
+# Build the Docker image and extract the pre-built index
+docker build -t rinha-fraud-2026:latest .
+docker create --name tmp-extract rinha-fraud-2026:latest
+docker cp tmp-extract:/app/data ./data
+docker rm tmp-extract
+
+# Add pre-built data files
+git add data/
+git commit -m "submission: update runtime files for preview test"
+
+# Push
+git push origin submission
+```
+
+The submission branch should look like:
 
 ```
-# main branch
-├── src/
-│   ├── index.js
-│   ├── routes.js
-│   └── vectorSearch.js
-├── info.json
-├── package.json
-├── package-lock.json
-└── README.md
-
-# submission branch
+submission/
 ├── docker-compose.yml
 ├── nginx.conf
 ├── info.json
-└── init.sql
+├── Dockerfile
+└── data/
+    └── rinha.idx
 ```
 
-The `docker-compose.yml` file must sit at the root of the `submission` branch. Without it, your backend cannot be tested.
+## 3. Trigger a preview test
 
-Your repository also needs an `info.json` file with the fields below. This helps us understand which technologies are most used in this edition of Rinha, and lets us reach you if we need to — to announce a win, make a referral, and so on.
+Open an issue on [zanfranceschi/rinha-de-backend-2026](https://github.com/zanfranceschi/rinha-de-backend-2026) with:
 
-```json
-{
-    "participants": ["José Alves", "Ana Zanfranceschi"],
-    "social": ["https://github.com/ja/", "https://www.linkedin.com/in/anazan"],
-    "source-code-repo": "https://github.com/100f/rinha-backend-2025",
-    "stack": ["java", "postgres", "nginx", "redis"],
-    "open_to_work": true
-}
+```
+rinha/test rinha-2026-python1
 ```
 
-A note on the **open_to_work** field: if you are looking for new opportunities and want people to know about it, set this field to `true`.
+The Rinha Engine will:
+1. Clone the `submission` branch
+2. Run `docker compose up`
+3. Execute the k6 load test
+4. Post score as a comment and close the issue
 
-## Preview and final test
+You can submit as many preview tests as you want.
 
-There are two testing moments in Rinha:
+## 4. Iterate
 
-- **Preview tests** — you can submit your backend to as many preview tests as you want – they serve as a practice run for the final test. Just open an issue [like this one](https://github.com/zanfranceschi/rinha-de-backend-2026/issues/49) with `rinha/test [optional id of your submission]` in the issue description. The Rinha Engine scans all open issues with that description, runs a preview test, posts the results (or any error) together with your score as a comment, and closes the issue. Take full advantage of preview tests to make small adjustments, try different configurations, and so on.
+After a preview test, check the score comment. Key metrics to watch:
 
-- **Final test** — runs a single time, at the end of Rinha, and it is what defines the official score of each participant. It uses a different script from the preview script — likely heavier, capable of demanding more from your backend (more volume, more load, different scenarios). The date of the final test is not defined yet.
+| Metric | Target | Why |
+|---|---|---|
+| p99 latency | < 2000ms (ideally < 1ms) | Below 2000ms avoids -3000 penalty |
+| HTTP error rate | < 1% | Errors weighted 5×; above 15% = -3000 |
+| FP count | minimize | Weight 1× |
+| FN count | minimize | Weight 3× |
 
-### Test environment
+Common iteration loop:
 
-This year, Rinha runs on a [Mac Mini Late 2014](https://support.apple.com/en-us/111931) with Ubuntu 24.04.
+```bash
+# Back on main, make changes
+git checkout main
+# ... edit code ...
+make pack
+docker compose up --build
+k6 run test/test.js
 
-## Process note
+# When satisfied, repeat step 2 and 3
+```
 
-For the `mpraes` submission, the participant registration PR in the upstream Rinha repository should use the same minimal JSON format as the accepted examples:
+## 5. Final test
+
+The final test runs once at the end of Rinha. It uses a heavier script than the preview. The date is TBD.
+
+Ensure the `submission` branch is up to date with your best configuration before the final test window.
+
+## Registration file
+
+The participant registration in the upstream Rinha repo uses:
 
 ```json
 [
-    {
-        "id": "rinha-2026-python2",
-        "repo": "https://github.com/mpraes/rinha-2026-python2"
-    },
     {
         "id": "rinha-2026-python1",
         "repo": "https://github.com/mpraes/rinha-2026-python1"
@@ -110,13 +130,11 @@ For the `mpraes` submission, the participant registration PR in the upstream Rin
 ]
 ```
 
-The PR title that matched the accepted pattern was `participants: update mpraes submission IDs`. The backend repository itself keeps `main` with source code and `submission` with only the runtime files required by the test.
+File: `participants/mpraes.json` in [zanfranceschi/rinha-de-backend-2026](https://github.com/zanfranceschi/rinha-de-backend-2026).
 
-Specs:
+## Test environment specs
 
-- 2.6 GHz
-- 8 GB of RAM
-- 1 TB of storage
-
-Home of this edition's Rinha!
-![rinha's mac mini](/misc/macmini-rinha.png)
+- Mac Mini Late 2014, Ubuntu 24.04
+- 2.6 GHz CPU, 8 GB RAM, 1 TB storage
+- 1 CPU core total, 350 MB memory total across all services
+- linux/amd64 Docker images only
